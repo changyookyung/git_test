@@ -1,0 +1,156 @@
+  WITH PLUS_CONTENT_INFO AS (
+/* 더중플 시리즈 정보*/
+ SELECT * FROM
+ EXTERNAL_QUERY('thejoongang-bq.asia-northeast3.thejoongang-mysql8',
+ '''
+   SELECT distinct
+		A.`*`,
+		B.TITLE,
+		DATE_FORMAT(B.SERVICE_DATE, '%Y-%m-%d') AS SERVICE_DATE,
+		B.ARTICLE_REPORTER
+	FROM VI_PAY22_CONT_CARD  A
+	INNER JOIN TB_ARTICLE_BASIC B ON A.TOTALID = B.TOTALID
+	UNION ALL
+	SELECT
+		B.*,
+		A.LETTER_TITLE AS TITLE,
+		DATE_FORMAT(A.SEND_DT, '%Y-%m-%d') AS SERVICE_DATE,
+		'' AS REP_NAME
+	FROM TB_NEWSLETTER_SEND_INFO A
+	INNER JOIN VI_PAY22_CONT_CARD B ON A.SEND_SEQ = B.PAGE_SEQ AND  PAGE_TYPE = 1
+	UNION ALL
+	SELECT
+		B.*,
+		A.PDF_TITLE AS TITLE,
+		DATE_FORMAT(A.REG_DT, '%Y-%m-%d') AS SERVICE_DATE,
+		'' AS REP_NAME
+	FROM TB_PAY22_PDF A
+	INNER JOIN VI_PAY22_CONT_CARD B ON A.PDF_SEQ = B.PAGE_SEQ AND PAGE_TYPE = 2
+ ''')
+ )
+
+, uid AS
+-- 기간 내에 특정 시리즈 기사에서 구매한 모든 유저
+(  
+  SELECT
+    START_PURCHASE,
+		START_REG_DT,
+    SAFE_CAST(USER_ID AS STRING) AS hit_uid,
+		fid,
+		CHANNEL,
+		SOURCE,
+    B.PKG_SEQ AS PURCHASE_PKG_SEQ,
+    B.PKG_NM AS PURCHASE_PKG_NM,
+		B.PAGE_SEQ AS PURCHASE_PAGE_SEQ,
+		B.TITLE AS PURCHASE_TITLE
+  FROM
+  EXTERNAL_QUERY('thejoongang-bq.asia-northeast3.thejoongang-mysql8',
+  '''
+    SELECT
+      START_PURCHASE,
+			START_REG_DT,
+      USER_ID,
+			fid,
+			CHANNEL,
+			SOURCE,
+      PKG_SEQ,
+			PAGE_SEQ,
+      PKG_NM
+    FROM TB_BILL_PURCHASE_ROW A
+		    WHERE (DT = '2024-02-04' -- 날짜 바꿔주기....
+      AND PAGE_SEQ in (25210144,25223412,25225359,25226256,25225704)
+      AND START_PURCHASE BETWEEN '2024-01-29' AND '2024-02-04'
+      AND CHANNEL = 'direct' and source = '(direct)' -- 직접 검색 또는 링크로 유입 
+      and coupon_name is null		-- 마케팅 영향X
+				)
+			OR (DT = '2024-02-04' AND (COUPON_ID = 232 OR COUPON_ID = 1569)) -- 앤츠랩, 팩플 전용 쿠폰 
+    ORDER BY START_PURCHASE
+  ''' 	) A
+	INNER JOIN PLUS_CONTENT_INFO B ON B.PAGE_SEQ = A.PAGE_SEQ  -- 구매페이지 정보 
+
+
+) 
+
+, CAL_BASE AS (
+/* 모니터링 세션 */
+  SELECT 
+    RDT, DT,
+    HIT_UID, visitId, fullVisitorId, hitNumber, START_PURCHASE, start_reg_dt,
+    HIT_USER_PAID, HIT_USER_PAID_INT_CAT,
+    PRIMARY_SECTION, PLUS_CARD_STAT, PLUS_INT_CAT,
+		ISENTRANCE,
+    ONTIME,
+    CHANNEL, 
+		SOURCE,
+		PAGEPATH,
+		INAPP_BROWSER,
+		PURCHASE_PKG_NM,
+		PURCHASE_PAGE_SEQ,
+		PURCHASE_TITLE, -- 구매페이지정보 
+		TOTALID -- 조회페이지정보 
+  FROM
+  ( 
+    SELECT
+      DATE(A.DT) AS RDT, A.DT,
+      A.HIT_UID, visitId, fullVisitorId, hitNumber,START_PURCHASE,START_REG_DT,
+      HIT_USER_PAID, HIT_USER_PAID_INT_CAT,
+      `thejoongang-bq.functions.get_pagepath_pagetype`(PAGEPATH_LEVEL1, PAGEPATH_LEVEL2) as PAGE_TYPE,
+      `thejoongang-bq.functions.get_pagepath_pageseq`(PAGEPATH_LEVEL1, PAGEPATH_LEVEL2, PAGEPATH_LEVEL3) as TOTALID,
+      PRIMARY_SECTION, PLUS_CARD_STAT, PLUS_INT_CAT,
+			ISENTRANCE,
+      ONTIME,
+      A.CHANNEL,
+			A.SOURCE, 
+			PAGEPATH,
+			INAPP_BROWSER,
+      PURCHASE_PKG_SEQ,
+			PURCHASE_PAGE_SEQ,
+      PURCHASE_PKG_NM,
+			PURCHASE_TITLE
+    FROM `thejoongang-bq.DS_STAT.TB_JA_SESSIONS_*` A
+    INNER JOIN uid B ON (B.fid = A.fullVisitorId)   --  특정 구매자의 세션만
+    where (_TABLE_SUFFIX BETWEEN '20240129' and '20240204')
+          and PROPERTY_ID = '244097637'
+					and A.DT <= B.START_REG_DT		-- 구매시점 이전 세션만
+        --  AND QUERY_STRING = '' -- UTM없는 직접 유입만
+			  	AND A.CHANNEL = 'Direct'
+				--	AND PURCHASE_PAGE_SEQ = 25220712
+          
+ )  
+--  LEFT JOIN PLUS_CONTENT_INFO B ON (A.TOTALID = B.PAGE_SEQ)  -- 세션 페이지 = 플러스 페이지 매칭
+  
+)
+
+
+SELECT
+  RDT,
+	DT,
+  HIT_UID,
+	fullvisitorId,
+	visitid,
+	hitnumber,
+  START_PURCHASE,
+-- START_REG_DT,
+	ISENTRANCE,
+	INAPP_BROWSER,
+  B.PKG_NM,
+  B.PKG_SEQ,
+  B.PAGE_SEQ,
+  B.TITLE,
+--	PURCHASE_PKG_NM,
+--	PURCHASE_PAGE_SEQ,
+--  PURCHASE_TITLE,
+  CHANNEL, 
+	SOURCE,
+--	A.TOTALID,
+-- 	PAGEPATH,
+ -- COUNT(DISTINCT HIT_UID) AS PU_UV,
+ 
+FROM CAL_BASE A
+LEFT JOIN PLUS_CONTENT_INFO B ON (A.TOTALID = B.PAGE_SEQ)  -- 세션 페이지 = 플러스 페이지 매칭
+WHERE  PURCHASE_PAGE_SEQ = page_seq
+--  PRIMARY_SECTION = '중앙플러스'
+--      AND HIT_USER_PAID = 'Y'   --  구매권이 살아있는 상태만
+      -- AND PLUS_CARD_STAT = '유료 전용'  --  전문 공개 기사 제외
+-- GROUP BY RDT, DT,  HIT_UID, fullvisitorId,	visitid,	hitnumber,PKG_NM, START_PURCHASE, START_REG_DT, ISENTRANCE, PKG_SEQ, PAGE_SEQ, PURCHASE_PKG_NM,	PURCHASE_PAGE_SEQ, PURCHASE_TITLE,CHANNEL, SOURCE, PAGEPATH, TOTALID, TITLE
+ORDER BY RDT, DT,  HIT_UID, PKG_NM
